@@ -96,7 +96,7 @@ impl SplitterBoyo {
 
     fn run(
         &self,
-    ) -> Result<Vec<tokio::task::JoinHandle<Result<String, io::Error>>>, SplitterError> {
+    ) -> Result<Vec<tokio::task::JoinHandle<Result<String, WriterError>>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
@@ -148,6 +148,15 @@ struct WriterBoyo {
     progress_boyo: ProgressBoyo,
 }
 
+#[derive(Debug, Error)]
+enum WriterError {
+    #[error("SplitterError: {0}")]
+    FileCreateError(#[from] std::io::Error),
+    #[error("Unexpected filename {0:?}")]
+    UnexpectedFilename(PathBuf),
+}
+
+
 impl WriterBoyo {
     fn new(output_path: PathBuf, separator: u8, source: Vec<Vec<u8>>) -> WriterBoyo {
         WriterBoyo {
@@ -158,18 +167,23 @@ impl WriterBoyo {
         }
     }
 
-    fn run(&mut self) -> Result<String, std::io::Error> {
-        // TODO beautify
-        let op = self.output_path.file_name().unwrap().to_str().unwrap();
-        let file = File::create(&self.output_path)?;
-        let mut bw = BufWriter::new(file);
+    fn run(&mut self) -> Result<String, WriterError> {
 
-        while let Some(d) = self.source.pop() {
-            let s = d.as_slice();
-            bw.write(s)?;
+        match self.output_path.file_name().map(|f| f.to_str()).flatten() {
+            Some(fname) => {
+                let file = File::create(&self.output_path)?;
+                let mut bw = BufWriter::new(file);
+        
+                while let Some(d) = self.source.pop() {
+                    let s = d.as_slice();
+                    bw.write(s)?;
+                }
+        
+                Ok(String::from(fname))
+            }
+            _ => Err(WriterError::UnexpectedFilename(self.output_path.clone()))
         }
-
-        Ok(String::from(op))
+    
     }
 }
 #[tokio::main]
