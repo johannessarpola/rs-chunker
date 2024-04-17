@@ -61,8 +61,30 @@ enum SplitterError {
     FileError(#[from] std::io::Error),
 }
 
+struct Counter(usize);
+impl Counter {
+    fn increment_get(&mut self) -> usize {
+        self.0 += 1;
+        self.0
+    }
+
+    fn new() -> Counter {
+        Counter(0)
+    }
+
+    fn get(&self) -> usize {
+        self.0
+    }
+}
+
 impl SplitterBoyo {
-    fn new(input_path: PathBuf, output_folder: String, cs: usize, es: u32, sep: u8) -> SplitterBoyo {
+    fn new(
+        input_path: PathBuf,
+        output_folder: String,
+        cs: usize,
+        es: u32,
+        sep: u8,
+    ) -> SplitterBoyo {
         SplitterBoyo {
             input_path,
             output_folder,
@@ -72,43 +94,42 @@ impl SplitterBoyo {
         }
     }
 
-    fn run(&self) -> Result<(), SplitterError> {
+    fn run(
+        &self,
+    ) -> Result<Vec<tokio::task::JoinHandle<Result<String, io::Error>>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
         let mut chunk: Vec<Vec<u8>> = Vec::with_capacity(self.chunk_size);
-        let mut counter: usize = 0;
-        let mut file_counter: usize = 0;
-
+        let mut c = Counter::new();
+        let mut fc = Counter::new();
 
         let file_stem = self.input_path.file_stem().unwrap().to_str().unwrap();
-        let extension = self.input_path.extension().unwrap_or_default().to_str().unwrap();
+        let extension = self.input_path.extension().unwrap().to_str().unwrap();
+
+        let mut handles = Vec::new();
 
         while let Some(Ok(value)) = spliterator.next() {
-            let last = spliterator.peek().is_none();
-            println!("{}", String::from_utf8(value.clone()).unwrap());
+            let is_last = spliterator.peek().is_none();
             chunk.push(value);
-            counter += 1;
+            c.increment_get();
 
-            if (counter % self.chunk_size == 0 || last) {
-                file_counter += 1;
-                // start writer
-                let new_file_name = format!("{}_{}.{}", file_stem, file_counter, extension);
-                let output_file: PathBuf = [r"", &self.output_folder, &new_file_name].iter().collect();
-                println!("{}", new_file_name);
-                let mut wb = WriterBoyo::new(output_file, self.separator, chunk);
-                wb.run();
+            if (c.get() % self.chunk_size == 0 || is_last) {
+                // stuff
+                let output_file_name: String =
+                    format!("{}_{}.{}", file_stem, fc.increment_get(), extension);
+                let output_file: PathBuf =
+                    [&self.output_folder, &output_file_name].iter().collect();
+                println!("{}", output_file_name);
+                let mut wb = WriterBoyo::new(output_file, self.separator, chunk.clone());
 
-                if !last {
-                    chunk = Vec::with_capacity(self.chunk_size);
-                } else {
-                    // needs to be here to prevent errors about borrowing
-                    chunk = Vec::new();
-                }
+                let handle = tokio::spawn(async move { wb.run() });
+                handles.push(handle);
+                chunk.clear();
             }
         }
 
-        Ok(())
+        Ok(handles)
     }
 }
 
@@ -116,7 +137,7 @@ struct ProgressBoyo {}
 
 impl ProgressBoyo {
     fn new() -> ProgressBoyo {
-        ProgressBoyo{}
+        ProgressBoyo {}
     }
 }
 
@@ -137,29 +158,40 @@ impl WriterBoyo {
         }
     }
 
-    fn run(&mut self) -> Result<&str, std::io::Error> {
+    fn run(&mut self) -> Result<String, std::io::Error> {
         // TODO beautify
         let op = self.output_path.file_name().unwrap().to_str().unwrap();
         let file = File::create(&self.output_path)?;
         let mut bw = BufWriter::new(file);
-        
+
         while let Some(d) = self.source.pop() {
             let s = d.as_slice();
             bw.write(s)?;
         }
 
-        Ok(op)
+        Ok(String::from(op))
     }
 }
-
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let paths = gather_files(".in")?;
 
     for path in paths {
         println!("{:?}", path);
 
-        let splitter = SplitterBoyo::new(path, String::from(".out"),10, 10, b'\n');
-        splitter.run();
+        let splitter = SplitterBoyo::new(path, String::from(".out"), 10, 10, b'\n');
+        let f = tokio::spawn(async move {
+            let handles = splitter.run();
+            match handles {
+                Ok(hs) => {
+                    for h in hs {
+                        h.await;
+                    }
+                }
+                Err(e) => print!("errerr"),
+            }
+        })
+        .await;
     }
     Ok(())
 }
