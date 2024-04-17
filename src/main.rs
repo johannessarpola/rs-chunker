@@ -13,6 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 use thiserror::Error;
+use tokio::task::JoinHandle;
 
 // read a file
 fn folder_exists(path: &str) -> bool {
@@ -59,6 +60,8 @@ struct SplitterBoyo {
 enum SplitterError {
     #[error("SplitterError: {0}")]
     FileError(#[from] std::io::Error),
+    #[error("SplitterError: {0}")]
+    InvalidPath(PathBuf),
 }
 
 struct Counter(usize);
@@ -94,18 +97,26 @@ impl SplitterBoyo {
         }
     }
 
-    fn run(
-        &self,
-    ) -> Result<Vec<tokio::task::JoinHandle<Result<String, WriterError>>>, SplitterError> {
+    fn create_output_file_path(&self, counter: usize) -> Result<PathBuf, SplitterError> {
+        match (
+            self.input_path.file_stem().map(|f| f.to_str()).flatten(),
+            self.input_path.extension().map(|f| f.to_str()).flatten(),
+        ) {
+            (Some(stem), Some(extension)) => {
+                let output_file_name: String = format!("{}_{}.{}", stem, counter, extension);
+                Ok([&self.output_folder, &output_file_name].iter().collect())
+            }
+            _ => Err(SplitterError::InvalidPath(self.input_path.clone())),
+        }
+    }
+
+    fn run(&self) -> Result<Vec<JoinHandle<Result<String, WriterError>>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
         let mut chunk: Vec<Vec<u8>> = Vec::with_capacity(self.chunk_size);
         let mut c = Counter::new();
         let mut fc = Counter::new();
-
-        let file_stem = self.input_path.file_stem().unwrap().to_str().unwrap();
-        let extension = self.input_path.extension().unwrap().to_str().unwrap();
 
         let mut handles = Vec::new();
 
@@ -116,12 +127,8 @@ impl SplitterBoyo {
 
             if (c.get() % self.chunk_size == 0 || is_last) {
                 // stuff
-                let output_file_name: String =
-                    format!("{}_{}.{}", file_stem, fc.increment_get(), extension);
-                let output_file: PathBuf =
-                    [&self.output_folder, &output_file_name].iter().collect();
-                println!("{}", output_file_name);
-                let mut wb = WriterBoyo::new(output_file, self.separator, chunk.clone());
+                let opf = self.create_output_file_path(fc.increment_get())?;
+                let mut wb = WriterBoyo::new(opf, self.separator, chunk.clone());
 
                 let handle = tokio::spawn(async move { wb.run() });
                 handles.push(handle);
@@ -156,7 +163,6 @@ enum WriterError {
     UnexpectedFilename(PathBuf),
 }
 
-
 impl WriterBoyo {
     fn new(output_path: PathBuf, separator: u8, source: Vec<Vec<u8>>) -> WriterBoyo {
         WriterBoyo {
@@ -168,22 +174,20 @@ impl WriterBoyo {
     }
 
     fn run(&mut self) -> Result<String, WriterError> {
-
         match self.output_path.file_name().map(|f| f.to_str()).flatten() {
             Some(fname) => {
                 let file = File::create(&self.output_path)?;
                 let mut bw = BufWriter::new(file);
-        
+
                 while let Some(d) = self.source.pop() {
                     let s = d.as_slice();
                     bw.write(s)?;
                 }
-        
+
                 Ok(String::from(fname))
             }
-            _ => Err(WriterError::UnexpectedFilename(self.output_path.clone()))
+            _ => Err(WriterError::UnexpectedFilename(self.output_path.clone())),
         }
-    
     }
 }
 #[tokio::main]
