@@ -1,6 +1,4 @@
-
 use clap::Parser;
-use tokio::task::JoinSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
@@ -11,7 +9,12 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 fn gather_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
     let files = fs::read_dir(path)?
@@ -110,6 +113,7 @@ impl SplitterBoyo {
             std::fs::create_dir(&self.output_folder)?;
         }
 
+        let (progress_tx, progress_rx) = channel::<bool>();
         while let Some(Ok(value)) = spliterator.next() {
             let is_last = spliterator.peek().is_none();
 
@@ -120,30 +124,31 @@ impl SplitterBoyo {
                 // stuff
                 let opf = self.create_output_file_path(fc.increment_get())?;
                 let mut wb = WriterBoyo::new(opf, chunk);
-
-                handles.spawn(async move { wb.run() });
+                let ptx = progress_tx.clone();
+                
+                handles.spawn(async move { 
+                    wb.run(Some(ptx)) 
+                });
 
                 chunk = VecDeque::with_capacity(self.chunk_size);
             }
         }
 
+        let mut progress_counter = Counter::new();
+        for _ in progress_rx.iter() {
+            progress_counter.increment_get();
+            if progress_counter.get() % 10 == 0{
+                println!("batch of 10 done")
+            }
+        }
         Ok(handles)
     }
 }
 
 #[allow(dead_code)]
-struct ProgressBoyo {}
-
-impl ProgressBoyo {
-    fn new() -> ProgressBoyo {
-        ProgressBoyo {}
-    }
-}
-#[allow(dead_code)]
 struct WriterBoyo {
     output_path: PathBuf,
     source: VecDeque<Vec<u8>>,
-    progress_boyo: ProgressBoyo,
 }
 
 #[derive(Debug, Error)]
@@ -157,13 +162,12 @@ enum WriterError {
 impl WriterBoyo {
     fn new(output_path: PathBuf, source: VecDeque<Vec<u8>>) -> WriterBoyo {
         WriterBoyo {
-            progress_boyo: ProgressBoyo::new(),
             output_path,
             source,
         }
     }
 
-    fn run(&mut self) -> Result<String, WriterError> {
+    fn run(&mut self, progress_tx: Option<Sender<bool>>) -> Result<String, WriterError> {
         match self.output_path.file_name().map(|f| f.to_str()).flatten() {
             Some(fname) => {
                 let file = File::create(&self.output_path)?;
@@ -172,6 +176,11 @@ impl WriterBoyo {
                 while let Some(d) = self.source.pop_front() {
                     let s = d.as_slice();
                     bw.write(s)?;
+
+                    if let Some(rx) = &progress_tx {
+                        // we can ignore errors in this case
+                        let _ = rx.send(true);
+                    }
                 }
 
                 Ok(fname.to_owned())
@@ -223,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    
+
     // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
         res?
