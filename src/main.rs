@@ -120,6 +120,11 @@ impl SplitterBoyo {
 
         let mut handles = JoinSet::new();
 
+        // create output dir if it does not exist
+        if(!Path::new(&self.output_folder).exists()) {
+            std::fs::create_dir(&self.output_folder)?;
+        }
+
         while let Some(Ok(value)) = spliterator.next() {
             let is_last = spliterator.peek().is_none();
 
