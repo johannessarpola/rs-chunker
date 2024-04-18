@@ -112,7 +112,7 @@ impl SplitterBoyo {
         }
     }
 
-    fn run(&self) -> Result<Vec<JoinHandle<Result<String, WriterError>>>, SplitterError> {
+    fn run(&self) -> Result<JoinSet<Result<String, WriterError>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
@@ -120,11 +120,11 @@ impl SplitterBoyo {
         let mut c = Counter::new();
         let mut fc = Counter::new();
 
-        let mut handles = Vec::new();
+        let mut handles = JoinSet::new();
 
         while let Some(Ok(value)) = spliterator.next() {
             let is_last = spliterator.peek().is_none();
-            
+
             chunk.push_back(value);
             c.increment_get();
 
@@ -133,8 +133,8 @@ impl SplitterBoyo {
                 let opf = self.create_output_file_path(fc.increment_get())?;
                 let mut wb = WriterBoyo::new(opf, self.separator, chunk);
 
-                let handle = tokio::spawn(async move { wb.run() });
-                handles.push(handle);
+                handles.spawn(async move { wb.run() });
+
                 chunk = VecDeque::with_capacity(self.chunk_size);
             }
         }
@@ -196,29 +196,28 @@ impl WriterBoyo {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let paths = gather_files(".in")?;
-    let mut set = JoinSet::new();
+    let mut sjoin_set = JoinSet::new();
 
     for path in paths {
         println!("{:?}", path);
 
         let splitter = SplitterBoyo::new(path, String::from(".out"), 10, 10, b'\n');
-        set.spawn(async move {
-            let handles = splitter.run();
-            match handles {
-                Ok(hs) => {
-                    for h in hs {
-                        match h.await {
+        sjoin_set.spawn(async move {
+            match splitter.run() {
+                Ok(mut wjoin_set) => {
+                    while let Some(writer_result) = wjoin_set.join_next().await {
+                        match writer_result {
                             Ok(Ok(v)) => println!("outputted file {}", v),
-                            Ok(Err(e)) => println!("error in writing: {}", e),
+                            Ok(Err(e)) => println!("error in writer task: {}", e),
                             Err(e) => println!("error in joining: {}", e),
                         }
                     }
                 }
-                Err(e) => println!("error in splitting: {} ", e),
+                Err(e) => println!("error running splitter: {}", e),
             }
         });
     }
-    while let Some(res) = set.join_next().await {
+    while let Some(res) = sjoin_set.join_next().await {
         println!("{:?}", res);
     }
     Ok(())
