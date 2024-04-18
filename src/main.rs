@@ -1,5 +1,6 @@
 #![allow(unused, dead_code, unused_variables, unused_imports)]
 
+use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
 use std::fs;
@@ -115,7 +116,7 @@ impl SplitterBoyo {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
-        let mut chunk: Vec<Vec<u8>> = Vec::with_capacity(self.chunk_size);
+        let mut chunk: VecDeque<Vec<u8>> = VecDeque::with_capacity(self.chunk_size);
         let mut c = Counter::new();
         let mut fc = Counter::new();
 
@@ -123,7 +124,8 @@ impl SplitterBoyo {
 
         while let Some(Ok(value)) = spliterator.next() {
             let is_last = spliterator.peek().is_none();
-            chunk.push(value);
+            
+            chunk.push_back(value);
             c.increment_get();
 
             if (c.get() % self.chunk_size == 0 || is_last) {
@@ -133,7 +135,7 @@ impl SplitterBoyo {
 
                 let handle = tokio::spawn(async move { wb.run() });
                 handles.push(handle);
-                chunk = Vec::with_capacity(self.chunk_size);
+                chunk = VecDeque::with_capacity(self.chunk_size);
             }
         }
 
@@ -152,7 +154,7 @@ impl ProgressBoyo {
 struct WriterBoyo {
     separator: u8,
     output_path: PathBuf,
-    source: Vec<Vec<u8>>,
+    source: VecDeque<Vec<u8>>,
     progress_boyo: ProgressBoyo,
 }
 
@@ -165,7 +167,7 @@ enum WriterError {
 }
 
 impl WriterBoyo {
-    fn new(output_path: PathBuf, separator: u8, source: Vec<Vec<u8>>) -> WriterBoyo {
+    fn new(output_path: PathBuf, separator: u8, source: VecDeque<Vec<u8>>) -> WriterBoyo {
         WriterBoyo {
             progress_boyo: ProgressBoyo::new(),
             separator,
@@ -180,7 +182,7 @@ impl WriterBoyo {
                 let file = File::create(&self.output_path)?;
                 let mut bw = BufWriter::new(file);
 
-                while let Some(d) = self.source.pop() {
+                while let Some(d) = self.source.pop_front() {
                     let s = d.as_slice();
                     bw.write(s)?;
                 }
