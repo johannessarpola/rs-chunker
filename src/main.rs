@@ -1,9 +1,7 @@
-#![allow(unused, dead_code, unused_variables, unused_imports)]
 
 use clap::Parser;
+use tokio::task::JoinSet;
 use std::collections::VecDeque;
-use std::env;
-use std::fmt::format;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -13,16 +11,7 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process;
 use thiserror::Error;
-use tokio::task::JoinHandle;
-use tokio::task::JoinSet;
-
-// read a file
-fn folder_exists(path: &str) -> bool {
-    let p = Path::new(path);
-    p.exists() && p.is_dir()
-}
 
 fn gather_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
     let files = fs::read_dir(path)?
@@ -50,10 +39,6 @@ struct ChunkyBoyoConfig {
     separator: u8,
     #[arg(short, long, default_value_t = false)]
     verbose: bool,
-}
-
-struct ReaderBoyo {
-    config: ChunkyBoyoConfig,
 }
 
 struct SplitterBoyo {
@@ -121,7 +106,7 @@ impl SplitterBoyo {
         let mut handles = JoinSet::new();
 
         // create output dir if it does not exist
-        if(!Path::new(&self.output_folder).exists()) {
+        if !Path::new(&self.output_folder).exists() {
             std::fs::create_dir(&self.output_folder)?;
         }
 
@@ -131,10 +116,10 @@ impl SplitterBoyo {
             chunk.push_back(value);
             c.increment_get();
 
-            if (c.get() % self.chunk_size == 0 || is_last) {
+            if c.get() % self.chunk_size == 0 || is_last {
                 // stuff
                 let opf = self.create_output_file_path(fc.increment_get())?;
-                let mut wb = WriterBoyo::new(opf, self.separator, chunk);
+                let mut wb = WriterBoyo::new(opf, chunk);
 
                 handles.spawn(async move { wb.run() });
 
@@ -146,6 +131,7 @@ impl SplitterBoyo {
     }
 }
 
+#[allow(dead_code)]
 struct ProgressBoyo {}
 
 impl ProgressBoyo {
@@ -153,9 +139,8 @@ impl ProgressBoyo {
         ProgressBoyo {}
     }
 }
-
+#[allow(dead_code)]
 struct WriterBoyo {
-    separator: u8,
     output_path: PathBuf,
     source: VecDeque<Vec<u8>>,
     progress_boyo: ProgressBoyo,
@@ -170,10 +155,9 @@ enum WriterError {
 }
 
 impl WriterBoyo {
-    fn new(output_path: PathBuf, separator: u8, source: VecDeque<Vec<u8>>) -> WriterBoyo {
+    fn new(output_path: PathBuf, source: VecDeque<Vec<u8>>) -> WriterBoyo {
         WriterBoyo {
             progress_boyo: ProgressBoyo::new(),
-            separator,
             output_path,
             source,
         }
@@ -206,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     // print stuff
     let mut acc = String::new();
     for path in &paths {
-        if(acc.is_empty()) {
+        if acc.is_empty() {
             acc = String::from(path.to_str().unwrap_or_default());
         } else {
             acc = acc + "," + path.to_str().unwrap_or_default();
