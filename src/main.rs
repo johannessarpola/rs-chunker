@@ -1,5 +1,6 @@
 #![allow(unused, dead_code, unused_variables, unused_imports)]
 
+use clap::Parser;
 use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
@@ -36,13 +37,18 @@ fn gather_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
         .collect();
     Ok(files)
 }
-
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
 struct ChunkyBoyoConfig {
-    executor_size: u32,
-    chunk_size: u32,
+    #[arg(short, long, default_value_t = 10000)]
+    chunk_size: usize,
+    #[arg(short, long, default_value_t = String::from(".out"))]
     output_folder: String,
+    #[arg(short, long, default_value_t = String::from(".in"))]
     input_folder: String,
+    #[arg(short, long, default_value_t = b'\n')]
     separator: u8,
+    #[arg(short, long, default_value_t = false)]
     verbose: bool,
 }
 
@@ -54,7 +60,6 @@ struct SplitterBoyo {
     chunk_size: usize,
     input_path: PathBuf,
     output_folder: String,
-    executor_size: u32,
     separator: u8,
 }
 
@@ -83,18 +88,11 @@ impl Counter {
 }
 
 impl SplitterBoyo {
-    fn new(
-        input_path: PathBuf,
-        output_folder: String,
-        cs: usize,
-        es: u32,
-        sep: u8,
-    ) -> SplitterBoyo {
+    fn new(input_path: PathBuf, output_folder: String, cs: usize, sep: u8) -> SplitterBoyo {
         SplitterBoyo {
             input_path,
             output_folder,
             chunk_size: cs,
-            executor_size: es,
             separator: sep,
         }
     }
@@ -193,15 +191,34 @@ impl WriterBoyo {
         }
     }
 }
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let paths = gather_files(".in")?;
+    let config = ChunkyBoyoConfig::parse();
+
+    let paths = gather_files(&config.input_folder)?;
+
+    // print stuff
+    let mut acc = String::new();
+    for path in &paths {
+        if(acc.is_empty()) {
+            acc = String::from(path.to_str().unwrap_or_default());
+        } else {
+            acc = acc + "," + path.to_str().unwrap_or_default();
+        }
+    }
+
+    println!("Splitting files {}", acc);
+
     let mut sjoin_set = JoinSet::new();
 
     for path in paths {
-        println!("{:?}", path);
-
-        let splitter = SplitterBoyo::new(path, String::from(".out"), 10, 10, b'\n');
+        let splitter = SplitterBoyo::new(
+            path,
+            config.output_folder.clone(),
+            config.chunk_size,
+            config.separator,
+        );
         sjoin_set.spawn(async move {
             match splitter.run() {
                 Ok(mut wjoin_set) => {
@@ -217,8 +234,11 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    
+    // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
-        println!("{:?}", res);
+        res?
     }
+
     Ok(())
 }
