@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
+use std::thread::spawn;
 use thiserror::Error;
-use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 fn gather_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
@@ -98,7 +98,11 @@ impl SplitterBoyo {
         }
     }
 
-    fn run(&self) -> Result<JoinSet<Result<String, WriterError>>, SplitterError> {
+    fn run(
+        &self,
+        progress_tx: Option<Sender<bool>>,
+        total_tx: Option<Sender<usize>>,
+    ) -> Result<JoinSet<Result<String, WriterError>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
         let mut spliterator = BufReader::new(file).split(self.separator).peekable();
@@ -113,7 +117,6 @@ impl SplitterBoyo {
             std::fs::create_dir(&self.output_folder)?;
         }
 
-        let (progress_tx, progress_rx) = channel::<bool>();
         while let Some(Ok(value)) = spliterator.next() {
             let is_last = spliterator.peek().is_none();
 
@@ -121,31 +124,25 @@ impl SplitterBoyo {
             c.increment_get();
 
             if c.get() % self.chunk_size == 0 || is_last {
+                // forward the chunk size
+                if let Some(tx) = &total_tx {
+                    let _ = tx.send(chunk.len());
+                }
                 // stuff
                 let opf = self.create_output_file_path(fc.increment_get())?;
                 let mut wb = WriterBoyo::new(opf, chunk);
                 let ptx = progress_tx.clone();
-                
-                handles.spawn(async move { 
-                    wb.run(Some(ptx)) 
-                });
+
+                handles.spawn(async move { wb.run(ptx) });
 
                 chunk = VecDeque::with_capacity(self.chunk_size);
             }
         }
 
-        let mut progress_counter = Counter::new();
-        for _ in progress_rx.iter() {
-            progress_counter.increment_get();
-            if progress_counter.get() % 10 == 0{
-                println!("batch of 10 done")
-            }
-        }
         Ok(handles)
     }
 }
 
-#[allow(dead_code)]
 struct WriterBoyo {
     output_path: PathBuf,
     source: VecDeque<Vec<u8>>,
@@ -210,6 +207,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut sjoin_set = JoinSet::new();
 
+    let (progress_tx, progress_rx) = channel::<bool>();
+    let (total_tx, total_rx) = channel::<usize>();
+
     for path in paths {
         let splitter = SplitterBoyo::new(
             path,
@@ -217,8 +217,12 @@ async fn main() -> anyhow::Result<()> {
             config.chunk_size,
             config.separator,
         );
+
+        let ptx = progress_tx.clone();
+        let ttx = total_tx.clone();
+
         sjoin_set.spawn(async move {
-            match splitter.run() {
+            match splitter.run(Some(ptx), Some(ttx)) {
                 Ok(mut wjoin_set) => {
                     while let Some(writer_result) = wjoin_set.join_next().await {
                         match writer_result {
@@ -233,10 +237,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // TODO cleanup
+    let s = tokio::spawn(async move {
+        let mut pcntr = Counter::new();
+        for _ in progress_rx {
+            let v = pcntr.increment_get();
+            if v % 10 == 0 {
+                println!("10 done!");
+            }
+        }
+    });
+
+    // TODO cleanup
+    let s2 = tokio::spawn(async move {
+        let mut t: usize = 0;
+        for at in total_rx {
+            t += at;
+            println!("total at {}", t);
+        }
+    });
+
     // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
         res?
     }
 
+    // TODO fix & cleanup
+    let _ = s.abort();
+    // TODO fix & cleanup
+    let _ = s2.abort();
     Ok(())
 }
