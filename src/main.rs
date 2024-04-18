@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process;
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 // read a file
 fn folder_exists(path: &str) -> bool {
@@ -128,11 +129,11 @@ impl SplitterBoyo {
             if (c.get() % self.chunk_size == 0 || is_last) {
                 // stuff
                 let opf = self.create_output_file_path(fc.increment_get())?;
-                let mut wb = WriterBoyo::new(opf, self.separator, chunk.clone());
+                let mut wb = WriterBoyo::new(opf, self.separator, chunk);
 
                 let handle = tokio::spawn(async move { wb.run() });
                 handles.push(handle);
-                chunk.clear();
+                chunk = Vec::with_capacity(self.chunk_size);
             }
         }
 
@@ -184,7 +185,7 @@ impl WriterBoyo {
                     bw.write(s)?;
                 }
 
-                Ok(String::from(fname))
+                Ok(fname.to_owned())
             }
             _ => Err(WriterError::UnexpectedFilename(self.output_path.clone())),
         }
@@ -193,23 +194,30 @@ impl WriterBoyo {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let paths = gather_files(".in")?;
+    let mut set = JoinSet::new();
 
     for path in paths {
         println!("{:?}", path);
 
         let splitter = SplitterBoyo::new(path, String::from(".out"), 10, 10, b'\n');
-        let f = tokio::spawn(async move {
+        set.spawn(async move {
             let handles = splitter.run();
             match handles {
                 Ok(hs) => {
                     for h in hs {
-                        h.await;
+                        match h.await {
+                            Ok(Ok(v)) => println!("outputted file {}", v),
+                            Ok(Err(e)) => println!("error in writing: {}", e),
+                            Err(e) => println!("error in joining: {}", e),
+                        }
                     }
                 }
-                Err(e) => print!("errerr"),
+                Err(e) => println!("error in splitting: {} ", e),
             }
-        })
-        .await;
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        println!("{:?}", res);
     }
     Ok(())
 }
