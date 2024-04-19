@@ -182,7 +182,7 @@ impl WriterBoyo {
                     let s = d.as_slice();
                     bw.write(s)?;
 
-                    sleep(Duration::from_millis(10)).await;
+                    sleep(Duration::from_millis(100)).await;
                     if let Some(rx) = &progress_tx {
                         // we can ignore errors in this case
                         let _ = rx.send(true);
@@ -216,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut sjoin_set = JoinSet::new();
 
+    // TODO Skip if not verbose
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
     let (total_tx, total_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 
@@ -247,11 +248,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (cancel_tx, _) = broadcast::channel(1);
-    let progress_bar_handle = tokio::spawn(progress_bar(cancel_tx.subscribe()));
 
     // updates progress
     let pcntr_lock: Arc<RwLock<Counter>> = Arc::new(RwLock::new(Counter::new()));
-    let progress_updater = tokio::spawn(update_progress(
+    let progress_updater = tokio::spawn(update_progress_process(
         pcntr_lock.clone(),
         progress_rx,
         cancel_tx.subscribe(),
@@ -259,7 +259,17 @@ async fn main() -> anyhow::Result<()> {
 
     // updates total
     let tcntr_lock: Arc<RwLock<Counter>> = Arc::new(RwLock::new(Counter::new()));
-    let totals_updater = tokio::spawn(update_totals(tcntr_lock, total_rx, cancel_tx.subscribe()));
+    let totals_updater = tokio::spawn(update_totals_process(
+        tcntr_lock.clone(),
+        total_rx,
+        cancel_tx.subscribe(),
+    ));
+
+    let progress_bar_handle = tokio::spawn(progress_bar_process(
+        pcntr_lock.clone(),
+        tcntr_lock.clone(),
+        cancel_tx.subscribe(),
+    ));
 
     // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
@@ -273,101 +283,85 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn progress_bar(mut cancel_receiver: broadcast::Receiver<()>) {
+async fn progress_bar_process(
+    pcntr: Arc<RwLock<Counter>>,
+    tcntr: Arc<RwLock<Counter>>,
+    mut cancel_receiver: broadcast::Receiver<()>,
+) {
+    let refresh_interval_ms = 25;
+    let bar_max_len = 10;
+
     loop {
-        // Wait for a signal from the cancellation channel
-        tokio::select! {
-                    _ = cancel_receiver.recv() => {
-                        println!("Task cancelled.");
-                        break;
-                    }
-                    _ = sleep(Duration::from_millis(100)) => {
-        //                println!("Doing some work...");
-                    }
-                }
+        let progress = pcntr.read().await.get();
+        let total = tcntr.read().await.get();
+
+        if progress > 0 && total > 0 {
+            let progress_pcnt = progress as f32 / total as f32 * 100. + 0.;
+            let bar_len = progress_pcnt.ceil() as usize / bar_max_len;
+
+            let pa = repeat_char('=', bar_len);
+            let pb = repeat_char('-', bar_max_len - bar_len);
+
+            print!("\rDone {:.2}% |{pa}{pb}|\n", progress_pcnt);
+        }
+
+        if let Ok(_) = cancel_receiver.try_recv() {
+            break;
+        } else {
+            sleep(Duration::from_millis(refresh_interval_ms)).await
+        }
     }
 }
 
-async fn update_progress(
+fn repeat_char(c: char, count: usize) -> String {
+    std::iter::repeat(c).take(count).collect()
+}
+
+async fn update_progress_process(
     pcntr: Arc<RwLock<Counter>>,
     mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<bool>,
     mut cancel_receiver: broadcast::Receiver<()>,
 ) {
-
     let refresh_interval_ms = 25;
-    let batch_size = 25;
-    let mut buffer: Vec<bool> = Vec::with_capacity(batch_size);
+
     loop {
-        // Wait for a signal from the cancellation channel
-        tokio::select! {
-            _ = cancel_receiver.recv() => {
-
-                while !progress_rx.is_empty() {
-                    if let Some(_) = progress_rx.recv().await {
-                        pcntr.write().await.increment_get();
-                    }
-                }
-
-                println!(
-                    "stopped updating progress, end at {}",
-                    pcntr.read().await.get()
-                );
-                break;
+        while !progress_rx.is_empty() {
+            if let Some(_) = progress_rx.recv().await {
+                pcntr.write().await.increment_get();
             }
-            _ = sleep(Duration::from_millis(refresh_interval_ms)) => {
-                progress_rx.recv_many(&mut buffer, batch_size).await;
-                pcntr.write().await.add_get(buffer.len());
-                buffer = Vec::with_capacity(100);
+        }
 
-                println!(
-                    "updating progress, at {}",
-                    pcntr.read().await.get()
-                );            }
+        if let Ok(_) = cancel_receiver.try_recv() {
+            println!(
+                "stopped updating progress, end at {}",
+                pcntr.read().await.get()
+            );
+            break;
+        } else {
+            sleep(Duration::from_millis(refresh_interval_ms)).await
         }
     }
 }
-async fn update_totals(
+
+async fn update_totals_process(
     tcntr: Arc<RwLock<Counter>>,
     mut total_rx: tokio::sync::mpsc::UnboundedReceiver<usize>,
     mut cancel_receiver: broadcast::Receiver<()>,
 ) {
     let refresh_interval_ms = 25;
-    let batch_size = 5;
-    let mut buffer: Vec<usize> = Vec::with_capacity(batch_size);
+
     loop {
-        // Wait for a signal from the cancellation channel
-        tokio::select! {
-            _ = cancel_receiver.recv() => {
-
-
-                while !total_rx.is_empty() {
-                    if let Some(t) = total_rx.recv().await {
-                        tcntr.write().await.add_get(t);
-                    }
-                }
-
-
-                println!(
-                    "stopped totals progress, end at {}",
-                    tcntr.read().await.get()
-                );
-                break;
+        while !total_rx.is_empty() {
+            if let Some(t) = total_rx.recv().await {
+                tcntr.write().await.add_get(t);
             }
-            _ = sleep(Duration::from_millis(refresh_interval_ms)) => {
-                total_rx.recv_many(&mut buffer, batch_size).await;
-                let mut subtotal: usize = 0;
-                for total in buffer {
-                    subtotal += total;
-                }
+        }
 
-                tcntr.write().await.add_get(subtotal);
-                buffer = Vec::with_capacity(100);
-
-                println!(
-                    "updating totals, at {}",
-                    tcntr.read().await.get()
-                );
-            }
+        if let Ok(_) = cancel_receiver.try_recv() {
+            println!("stopped totals, end at {}", tcntr.read().await.get());
+            break;
+        } else {
+            sleep(Duration::from_millis(refresh_interval_ms)).await
         }
     }
 }
