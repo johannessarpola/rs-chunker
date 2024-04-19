@@ -182,7 +182,7 @@ impl WriterBoyo {
                     let s = d.as_slice();
                     bw.write(s)?;
 
-                    sleep(Duration::from_millis(100)).await;
+                    //sleep(Duration::from_millis(100)).await; // TODO rm
                     if let Some(rx) = &progress_tx {
                         // we can ignore errors in this case
                         let _ = rx.send(true);
@@ -265,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
         cancel_tx.subscribe(),
     ));
 
-    let progress_bar_handle = tokio::spawn(progress_bar_process(
+    let progress_bar_updater = tokio::spawn(progress_bar_process(
         pcntr_lock.clone(),
         tcntr_lock.clone(),
         cancel_tx.subscribe(),
@@ -277,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _ = cancel_tx.send(());
-    let _ = progress_bar_handle.await;
+    let _ = progress_bar_updater.await;
     let _ = progress_updater.await;
     let _ = totals_updater.await;
     Ok(())
@@ -288,7 +288,7 @@ async fn progress_bar_process(
     tcntr: Arc<RwLock<Counter>>,
     mut cancel_receiver: broadcast::Receiver<()>,
 ) {
-    let refresh_interval_ms = 25;
+    let refresh_interval_ms = 10;
     let bar_max_len = 10;
 
     loop {
@@ -322,15 +322,12 @@ async fn update_progress_process(
     mut progress_rx: tokio::sync::mpsc::UnboundedReceiver<bool>,
     mut cancel_receiver: broadcast::Receiver<()>,
 ) {
-    let refresh_interval_ms = 25;
+    let refresh_interval_ms = 10;
 
     loop {
-        while !progress_rx.is_empty() {
-            if let Some(_) = progress_rx.recv().await {
-                pcntr.write().await.increment_get();
-            }
+        while let Ok(_) = progress_rx.try_recv() {
+            pcntr.write().await.increment_get();
         }
-
         if let Ok(_) = cancel_receiver.try_recv() {
             println!(
                 "stopped updating progress, end at {}",
@@ -348,13 +345,11 @@ async fn update_totals_process(
     mut total_rx: tokio::sync::mpsc::UnboundedReceiver<usize>,
     mut cancel_receiver: broadcast::Receiver<()>,
 ) {
-    let refresh_interval_ms = 25;
+    let refresh_interval_ms = 10;
 
     loop {
-        while !total_rx.is_empty() {
-            if let Some(t) = total_rx.recv().await {
-                tcntr.write().await.add_get(t);
-            }
+        while let Ok(t) = total_rx.try_recv() {
+            tcntr.write().await.add_get(t);
         }
 
         if let Ok(_) = cancel_receiver.try_recv() {
