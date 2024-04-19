@@ -182,7 +182,7 @@ impl WriterBoyo {
                     let s = d.as_slice();
                     bw.write(s)?;
 
-                    //sleep(Duration::from_millis(100)).await; // TODO rm
+                    //sleep(Duration::from_nanos(5)).await; // TODO rm
                     if let Some(rx) = &progress_tx {
                         // we can ignore errors in this case
                         let _ = rx.send(true);
@@ -230,13 +230,13 @@ async fn main() -> anyhow::Result<()> {
 
         let ptx = progress_tx.clone();
         let ttx = total_tx.clone();
-
+        
         sjoin_set.spawn(async move {
             match splitter.run(Some(ptx), Some(ttx)) {
                 Ok(mut wjoin_set) => {
                     while let Some(writer_result) = wjoin_set.join_next().await {
                         match writer_result {
-                            Ok(Ok(v)) => println!("outputted file {}", v),
+                            Ok(Ok(v)) => {}, // println!("outputted file {}", v), // TODO rm and output te filenames later
                             Ok(Err(e)) => println!("error in writer task: {}", e),
                             Err(e) => println!("error in joining: {}", e),
                         }
@@ -265,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
         cancel_tx.subscribe(),
     ));
 
+    // updates progress bar
     let progress_bar_updater = tokio::spawn(progress_bar_process(
         pcntr_lock.clone(),
         tcntr_lock.clone(),
@@ -276,6 +277,9 @@ async fn main() -> anyhow::Result<()> {
         res?
     }
 
+    // wait sometime for UI processes to catch up
+    let wait_time_ms = 250; 
+    sleep(Duration::from_millis(wait_time_ms)).await;
     let _ = cancel_tx.send(());
     let _ = progress_bar_updater.await;
     let _ = progress_updater.await;
@@ -295,14 +299,14 @@ async fn progress_bar_process(
         let progress = pcntr.read().await.get();
         let total = tcntr.read().await.get();
 
-        if progress > 0 && total > 0 {
-            let progress_pcnt = progress as f32 / total as f32 * 100. + 0.;
+        if total > 0 {
+            let progress_pcnt = progress as f32 / total as f32 * 100.;
             let bar_len = progress_pcnt.ceil() as usize / bar_max_len;
 
             let pa = repeat_char('=', bar_len);
             let pb = repeat_char('-', bar_max_len - bar_len);
 
-            print!("\rDone {:.2}% |{pa}{pb}|\n", progress_pcnt);
+            print!("\rDone {:.2}% |{pa}{pb}| ({progress}/{total})\n", progress_pcnt);
         }
 
         if let Ok(_) = cancel_receiver.try_recv() {
