@@ -1,4 +1,10 @@
 use clap::Parser;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
@@ -9,12 +15,10 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::Sender;
-use std::thread::spawn;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinSet;
+use tokio::time::{sleep, Duration};
 
 fn gather_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
     let files = fs::read_dir(path)?
@@ -61,6 +65,10 @@ enum SplitterError {
 
 struct Counter(usize);
 impl Counter {
+    fn add_get(&mut self, amount: usize) -> usize {
+        self.0 += amount;
+        self.0
+    } 
     fn increment_get(&mut self) -> usize {
         self.0 += 1;
         self.0
@@ -100,8 +108,8 @@ impl SplitterBoyo {
 
     fn run(
         &self,
-        progress_tx: Option<Sender<bool>>,
-        total_tx: Option<Sender<usize>>,
+        progress_tx: Option<UnboundedSender<bool>>,
+        total_tx: Option<UnboundedSender<usize>>,
     ) -> Result<JoinSet<Result<String, WriterError>>, SplitterError> {
         // split file into chunks
         let file = File::open(&self.input_path)?;
@@ -133,7 +141,7 @@ impl SplitterBoyo {
                 let mut wb = WriterBoyo::new(opf, chunk);
                 let ptx = progress_tx.clone();
 
-                handles.spawn(async move { wb.run(ptx) });
+                handles.spawn(async move { wb.run(ptx).await });
 
                 chunk = VecDeque::with_capacity(self.chunk_size);
             }
@@ -164,7 +172,7 @@ impl WriterBoyo {
         }
     }
 
-    fn run(&mut self, progress_tx: Option<Sender<bool>>) -> Result<String, WriterError> {
+    async fn run(&mut self, progress_tx: Option<UnboundedSender<bool>>) -> Result<String, WriterError> {
         match self.output_path.file_name().map(|f| f.to_str()).flatten() {
             Some(fname) => {
                 let file = File::create(&self.output_path)?;
@@ -174,6 +182,7 @@ impl WriterBoyo {
                     let s = d.as_slice();
                     bw.write(s)?;
 
+                    //sleep(Duration::from_secs(1)).await;
                     if let Some(rx) = &progress_tx {
                         // we can ignore errors in this case
                         let _ = rx.send(true);
@@ -207,8 +216,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut sjoin_set = JoinSet::new();
 
-    let (progress_tx, progress_rx) = channel::<bool>();
-    let (total_tx, total_rx) = channel::<usize>();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    let (total_tx, mut total_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 
     for path in paths {
         let splitter = SplitterBoyo::new(
@@ -237,34 +246,70 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // TODO cleanup
+    let lock = Arc::new(RwLock::new(Counter::new())); 
+    let pcntr_wrt = lock.clone();
+    #[allow(unused_variables)]
+    let pcntr_rd = lock.clone();
+
+    let lock = Arc::new(RwLock::new(Counter::new())); 
+    #[allow(unused_variables)]
+    let tcntr_wrt = lock.clone();
+    #[allow(unused_variables)]
+    let tcntr_rd = lock.clone();
+
+    // updates progress
     let s = tokio::spawn(async move {
-        let mut pcntr = Counter::new();
-        for _ in progress_rx {
-            let v = pcntr.increment_get();
-            if v % 10 == 0 {
-                println!("10 done!");
-            }
+       while let Some(_) = progress_rx.recv().await {
+            pcntr_wrt.write().await.increment_get();        
         }
+        println!("stopped updating progress, end at {}", pcntr_rd.read().await.get());
+
     });
 
-    // TODO cleanup
+    // updates total
     let s2 = tokio::spawn(async move {
-        let mut t: usize = 0;
-        for at in total_rx {
-            t += at;
-            println!("total at {}", t);
+        while let Some(amount) = total_rx.recv().await {
+            tcntr_wrt.write().await.add_get(amount);
         }
+        println!("stopped updating totals, total at {}", tcntr_rd.read().await.get());
     });
+
+    let (cancel_tx, cancel_rx) = broadcast::channel(1);
+    let progress_bar_handle = tokio::spawn(progress_bar(cancel_rx));
+
 
     // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
         res?
     }
 
-    // TODO fix & cleanup
-    let _ = s.abort();
-    // TODO fix & cleanup
-    let _ = s2.abort();
+    drop(progress_tx);
+    drop(total_tx);
+    let _ = cancel_tx.send(());
+    let _ = progress_bar_handle.await;
+    let _ = s.await;
+    let _ = s2.await;
     Ok(())
+}
+
+async fn progress_bar(mut cancel_receiver: broadcast::Receiver<()>) {
+    loop {
+        // Wait for a signal from the cancellation channel
+        tokio::select! {
+            _ = cancel_receiver.recv() => {
+                println!("Task cancelled.");
+                break;
+            }
+            _ = sleep(Duration::from_millis(100)) => {
+                println!("Doing some work...");
+            }
+        }
+    }
+}
+
+async fn update_progress(mut cancel_receiver: broadcast::Receiver<()>) {
+
+}
+async fn update_totals(mut cancel_receiver: broadcast::Receiver<()>) {
+
 }
