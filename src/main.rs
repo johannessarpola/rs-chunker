@@ -182,7 +182,7 @@ impl WriterBoyo {
                     let s = d.as_slice();
                     bw.write(s)?;
 
-                    //sleep(Duration::from_nanos(5)).await; // TODO rm
+                    sleep(Duration::from_nanos(5)).await; // TODO rm
                     if let Some(rx) = &progress_tx {
                         // we can ignore errors in this case
                         let _ = rx.send(true);
@@ -203,20 +203,17 @@ async fn main() -> anyhow::Result<()> {
     let paths = gather_files(&config.input_folder)?;
 
     // print stuff
-    let mut acc = String::new();
+    let mut acc = String::from("Splitting files: ");
     for path in &paths {
-        if acc.is_empty() {
-            acc = String::from(path.to_str().unwrap_or_default());
-        } else {
-            acc = acc + "," + path.to_str().unwrap_or_default();
-        }
+        acc = acc + "\n - " + path.to_str().unwrap_or_default();
     }
 
-    println!("Splitting files {}", acc);
+    if config.verbose {
+        println!("{}", acc);
+    }
 
     let mut sjoin_set = JoinSet::new();
 
-    // TODO Skip if not verbose
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
     let (total_tx, total_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 
@@ -230,20 +227,22 @@ async fn main() -> anyhow::Result<()> {
 
         let ptx = progress_tx.clone();
         let ttx = total_tx.clone();
-        
+
         sjoin_set.spawn(async move {
+            let mut ps: Vec<String> = Vec::new();
             match splitter.run(Some(ptx), Some(ttx)) {
                 Ok(mut wjoin_set) => {
                     while let Some(writer_result) = wjoin_set.join_next().await {
                         match writer_result {
-                            Ok(Ok(v)) => {}, // println!("outputted file {}", v), // TODO rm and output te filenames later
+                            Ok(Ok(v)) => ps.push(v),
                             Ok(Err(e)) => println!("error in writer task: {}", e),
                             Err(e) => println!("error in joining: {}", e),
-                        }
+                        };
                     }
                 }
                 Err(e) => println!("error running splitter: {}", e),
             }
+            ps
         });
     }
 
@@ -272,18 +271,36 @@ async fn main() -> anyhow::Result<()> {
         cancel_tx.subscribe(),
     ));
 
+    let mut rs = String::new();
+    let mut sp_idx = Counter::new();
     // not sure is there better way for this
     while let Some(res) = sjoin_set.join_next().await {
-        res?
+        match res {
+            Ok(vec) => {
+                if config.verbose {
+                    let s = format!("Splitter {} files:\n", sp_idx.increment_get());
+                    rs = rs + &s;
+                    for f in vec {
+                        let l = format!("   - {}\n", f);
+                        rs = rs + &l;
+                    }
+                }
+            }
+            Err(e) => println!("error joining: {}", e),
+        }
     }
 
     // wait sometime for UI processes to catch up
-    let wait_time_ms = 250; 
+    let wait_time_ms = 250;
     sleep(Duration::from_millis(wait_time_ms)).await;
     let _ = cancel_tx.send(());
     let _ = progress_bar_updater.await;
     let _ = progress_updater.await;
     let _ = totals_updater.await;
+
+    if config.verbose {
+        println!("{}", rs);
+    }
     Ok(())
 }
 
@@ -306,7 +323,10 @@ async fn progress_bar_process(
             let pa = repeat_char('=', bar_len);
             let pb = repeat_char('-', bar_max_len - bar_len);
 
-            print!("\rDone {:.2}% |{pa}{pb}| ({progress}/{total})\n", progress_pcnt);
+            print!(
+                "\rDone {:.2}% |{pa}{pb}| ({progress}/{total})",
+                progress_pcnt
+            );
         }
 
         if let Ok(_) = cancel_receiver.try_recv() {
@@ -333,10 +353,12 @@ async fn update_progress_process(
             pcntr.write().await.increment_get();
         }
         if let Ok(_) = cancel_receiver.try_recv() {
+            /*
             println!(
                 "stopped updating progress, end at {}",
                 pcntr.read().await.get()
             );
+            */
             break;
         } else {
             sleep(Duration::from_millis(refresh_interval_ms)).await
@@ -357,7 +379,9 @@ async fn update_totals_process(
         }
 
         if let Ok(_) = cancel_receiver.try_recv() {
+            /*
             println!("stopped totals, end at {}", tcntr.read().await.get());
+            */
             break;
         } else {
             sleep(Duration::from_millis(refresh_interval_ms)).await
