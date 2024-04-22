@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'chunker'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=chunker",
+                    "--package=chunker"
+                ],
+                "filter": {
+                    "name": "chunker",
+                    "kind": "bin"
+                }
+            },
+            "args": ["-c", "10"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'chunker'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=chunker",
+                    "--package=chunker"
+                ],
+                "filter": {
+                    "name": "chunker",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
