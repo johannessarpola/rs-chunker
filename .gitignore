@@ -1,3 +1,4 @@
 /target
 .out
 .in_ignored
+.vscode
