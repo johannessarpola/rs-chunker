@@ -5,7 +5,7 @@ Chunks the files from input folder into similar sized files using a separator.
 It has a cli which you can view help for with 
 
 ```
-cargo run -- -help
+cargo run -- --help
 ```
 
 without building the binary.
